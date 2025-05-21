@@ -6,6 +6,7 @@ import numpy as np
 from model_types import model_types
 from fairlearn.metrics import MetricFrame, selection_rate, mean_prediction
 
+#comienzo
 app = Flask(__name__)
 
 @app.route('/run-model', methods=['POST'])
