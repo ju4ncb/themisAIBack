@@ -2,6 +2,7 @@ from flask import Flask, request, jsonify
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import mean_squared_error, r2_score
 import pandas as pd
+import numpy as np
 from model_types import model_types
 from fairlearn.metrics import MetricFrame, selection_rate, mean_prediction
 
@@ -19,7 +20,18 @@ def run_model():
 
     df = pd.DataFrame(raw_data)
     X = df[features]
+    X = pd.get_dummies(X, drop_first=True)
     y = df[target]
+
+    # Encode sensitive feature if present and categorical
+    if sensitive_feature and sensitive_feature in df.columns:
+        sensitive_series = df[sensitive_feature]
+        if sensitive_series.dtype == 'object' or str(sensitive_series.dtype).startswith('category'):
+            sensitive_encoded, sensitive_labels = pd.factorize(sensitive_series)
+        else:
+            sensitive_encoded = sensitive_series.values
+    else:
+        sensitive_encoded = None
 
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 
@@ -43,8 +55,8 @@ def run_model():
     }
 
     # Fairness metrics
-    if sensitive_feature and sensitive_feature in df.columns:
-        sensitive_test = X_test[sensitive_feature]
+    if sensitive_encoded is not None:
+        sensitive_test = pd.Series(sensitive_encoded, index=df.index).loc[X_test.index]
         mf = MetricFrame(
             metrics={
                 "selection_rate": selection_rate,
@@ -54,8 +66,20 @@ def run_model():
             y_pred=y_pred,
             sensitive_features=sensitive_test
         )
-        results['fairness'] = mf.by_group.to_dict()
+        fairness_dict = mf.by_group.to_dict()
+        # Map numeric keys to original labels
+        fairness_dict_named = {
+            metric: {sensitive_labels[key] if isinstance(key, (int, np.integer)) and key < len(sensitive_labels) else key: value
+                     for key, value in group_dict.items()}
+            for metric, group_dict in fairness_dict.items()
+        }
+        results['fairness'] = fairness_dict_named
     return jsonify(results)
+
+@app.route('/model_types', methods=['GET'])
+def get_model_types():
+    return jsonify(list(model_types.keys()))
 
 if __name__ == '__main__':
     app.run(port=8000, debug=True)
+    
