@@ -13,6 +13,8 @@ import base64
 
 #comienzo
 app = Flask(__name__)
+matplotlib.use('Agg')
+graph_types = ["scatter", "hist", "box", "bar"]
 
 @app.route('/run-model', methods=['POST'])
 def run_model():
@@ -96,9 +98,6 @@ def run_model():
         fairness_plot_base64 = base64.b64encode(buf_fairness.read()).decode('utf-8')
         results['fairness_plot'] = fairness_plot_base64
 
-    # For regression: plot predicted vs actual values (scatter plot)
-    matplotlib.use('Agg')
-
     # Overfitting plot: train vs test predictions
     y_train_pred = model.predict(X_train)
     y_test_pred = y_pred  # already computed
@@ -129,6 +128,77 @@ def run_model():
 @app.route('/model-types', methods=['GET'])
 def get_model_types():
     return jsonify(list(model_types.keys()))
+
+@app.route('/graph-types', methods=['GET'])
+def get_graph_types():
+    return jsonify(graph_types)
+
+@app.route('/explore-data', methods=["POST"])
+def explore_data():
+    data = request.get_json()
+    raw_data = data.get('data')
+    x_values = data.get('x')
+    y = data.get('y')
+    if isinstance(y, list):
+        y = y[0] if len(y) > 0 else None
+
+    graph_type = data.get('graphType')
+    hue = data.get('hue', None)
+
+    df = pd.DataFrame(raw_data)
+    # Convert columns that can be turned into numeric
+    for col in df.columns:
+        df[col] = pd.to_numeric(df[col], errors='ignore')
+
+    plt.figure(figsize=(6, 4))
+
+
+    if graph_type == 'scatter':
+        sns.scatterplot(x=df[x_values].squeeze(), y=df[y], hue=df[hue] if hue else None, palette="hls")
+        plt.xlabel(x_values[0])
+        plt.ylabel(y)
+        plt.title(f'Diagrama de dispersión de {y} vs {x_values[0]}')
+    elif graph_type == 'hist':
+        for x_col in x_values:
+            sns.histplot(df[x_col], kde=True, hue=df[hue] if hue else None, palette="hls", element="step", alpha=0.5, label=x_col)
+        plt.xlabel(", ".join(str(col) for col in x_values))
+        plt.title(f'Histograma de {", ".join(str(col) for col in x_values)}')
+        plt.legend()
+    elif graph_type == 'box':
+        for x_col in x_values:
+            sns.boxplot(
+                x=x_col,
+                y=y,
+                data=df,
+                hue=df[hue] if hue else None,
+                palette="hls"
+            )
+        plt.ylabel(y)
+        plt.xlabel(", ".join(x_values))
+        plt.title(f'Diagrama de cajas y bigotes de {', '.join(x_values)}')
+    elif graph_type == 'bar' and y:
+        for x_col in x_values:
+            sns.barplot(x=df[x_col], y=df[y], hue=df[hue] if hue else None, palette="hls")
+        plt.xlabel(", ".join(x_values))
+        plt.ylabel(y)
+        plt.title(f'Diagrama de barras de {y} por {", ".join(x_values)}')
+    else:
+        plt.close()
+        return jsonify({'error': 'Unsupported graph type or missing parameters'}), 400
+
+    # Rotate x-tick labels if there are more than 5 unique ticks
+    ax = plt.gca()
+    x_tick_labels = ax.get_xticklabels()
+    if len(x_tick_labels) > 5:
+        plt.setp(x_tick_labels, rotation=45, ha='right')
+        
+    plt.tight_layout()
+    buf = io.BytesIO()
+    plt.savefig(buf, format='png')
+    plt.close()
+    buf.seek(0)
+    img_base64 = base64.b64encode(buf.read()).decode('utf-8')
+    return jsonify({'image': img_base64})
 
 if __name__ == '__main__':
     app.run(port=8000, debug=True)
