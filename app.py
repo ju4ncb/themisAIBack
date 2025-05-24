@@ -16,6 +16,7 @@ app = Flask(__name__)
 matplotlib.use('Agg')
 graph_types = ["scatter", "hist", "box", "bar"]
 
+
 @app.route('/run-model', methods=['POST'])
 def run_model():
     data = request.get_json()
@@ -26,11 +27,24 @@ def run_model():
     raw_data = data.get('data')
     sensitive_feature = data.get('sensitiveFeature', None)
 
-
     df = pd.DataFrame(raw_data)
+    df = df.dropna(subset=features + [target])
     X = df[features]
     X = pd.get_dummies(X, drop_first=True)
-    y = pd.to_numeric(df[target], errors='coerce')
+    # Determine if target is categorical or numeric
+    if df[target].dtype == 'object' or str(df[target].dtype).startswith('category'):
+        # Get only the first dummy column as a Series
+        y = pd.get_dummies(df[target], drop_first=False).iloc[:, 0]
+    else:
+        y = pd.to_numeric(df[target], errors='coerce')
+
+    print(target, df.columns)
+
+    # Check if there are enough samples to split
+    if len(X) == 0 or len(y) == 0:
+        return jsonify({'error': 'No valid data available after dropping missing values.'}), 400
+    if len(X) < 2:
+        return jsonify({'error': 'Not enough data to split into train and test sets.'}), 400
 
     # Encode sensitive feature if present and categorical
     if sensitive_feature and sensitive_feature in df.columns:
@@ -52,6 +66,7 @@ def run_model():
         model.fit(X_train, y_train)
         y_pred = model.predict(X_test)
     except Exception as e:
+        print(f"Error during model fitting or prediction: {str(e)}")
         return jsonify({'error': str(e)}), 400
 
     # Evaluate basic performance
@@ -88,6 +103,9 @@ def run_model():
         fairness_means = mf.by_group['mean_prediction']
         fairness_means.plot(kind='bar', color='skyblue')
         plt.ylabel('Mean Prediction')
+        # Show x-ticks as original sensitive group labels if available
+        if sensitive_feature and sensitive_feature in df.columns and 'sensitive_labels' in locals():
+            plt.xticks(ticks=range(len(sensitive_labels)), labels=sensitive_labels, rotation=45, ha='right')
         plt.xlabel(sensitive_feature)
         plt.title('Mean Prediction by Sensitive Group')
         plt.tight_layout()
@@ -160,7 +178,12 @@ def explore_data():
         plt.title(f'Diagrama de dispersión de {y} vs {x_values[0]}')
     elif graph_type == 'hist':
         for x_col in x_values:
-            sns.histplot(df[x_col], kde=True, hue=df[hue] if hue else None, palette="hls", element="step", alpha=0.5, label=x_col)
+            if hue and hue in df.columns:
+                for hue_value in df[hue].unique():
+                    subset = df[df[hue] == hue_value]
+                    sns.histplot(subset[x_col], kde=True, element="step", alpha=0.5, label=f"{x_col} ({hue_value})")
+            else:
+                sns.histplot(df[x_col], kde=True, element="step", alpha=0.5, label=x_col)
         plt.xlabel(", ".join(str(col) for col in x_values))
         plt.title(f'Histograma de {", ".join(str(col) for col in x_values)}')
         plt.legend()
@@ -175,7 +198,7 @@ def explore_data():
             )
         plt.ylabel(y)
         plt.xlabel(", ".join(x_values))
-        plt.title(f'Diagrama de cajas y bigotes de {', '.join(x_values)}')
+        plt.title(f"Diagrama de cajas y bigotes de {', '.join(x_values)}")
     elif graph_type == 'bar' and y:
         for x_col in x_values:
             sns.barplot(x=df[x_col], y=df[y], hue=df[hue] if hue else None, palette="hls")
