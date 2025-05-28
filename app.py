@@ -28,24 +28,34 @@ def run_model():
     raw_data = data.get('data')
     sensitive_feature = data.get('sensitiveFeature', None)
 
+    # Create DataFrame from raw data
     df = pd.DataFrame(raw_data)
-    df = df.dropna(subset=features + [target])
+
+    # Drop rows with missing values in target and features
+    df = df.dropna(subset=[target] + features)
+
     original_df = df.copy()
-    X = df[features]
-    X = pd.get_dummies(X, drop_first=True)
 
-    # Determine if target is categorical or numeric
-    y = pd.to_numeric(df[target], errors='coerce')
-
-    # Check if the first value is NaN
-    if pd.isna(y.iloc[0]):
+    if model_type in regression_models:
+        y = df[target].astype(float)
+        X = df[features]
+    elif model_type in classifier_models:
         y = df[target]
-        le = LabelEncoder()
-        y = le.fit_transform(y)
-        class_labels = le.classes_
+        X = df[features]
     else:
-        class_labels = np.unique(df[target])
-    
+        return jsonify({'error': 'Unsupported model type'}), 400
+
+    le = LabelEncoder()
+    y = le.fit_transform(y)
+
+    # Save class labels for classifiers
+    class_labels = le.classes_.tolist()
+
+    # Encode categorical features in X
+    for col in X.columns:
+        if X[col].dtype == 'object' or str(X[col].dtype).startswith('category'):
+            X[col] = le.fit_transform(X[col].astype(str))
+
     # Check if there are enough samples to split
     if len(X) == 0 or len(y) == 0:
         return jsonify({'error': 'No valid data available after dropping missing values.'}), 400
