@@ -1,10 +1,11 @@
 from flask import Flask, request, jsonify
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import root_mean_squared_error, r2_score
+from sklearn.metrics import root_mean_squared_error, r2_score, f1_score, accuracy_score, confusion_matrix
+from sklearn.preprocessing import LabelEncoder
+from fairlearn.metrics import MetricFrame, selection_rate, mean_prediction
+from model_types import regression_models, classifier_models
 import pandas as pd
 import numpy as np
-from model_types import model_types
-from fairlearn.metrics import MetricFrame, selection_rate, mean_prediction
 import matplotlib.pyplot as plt
 import matplotlib
 import seaborn as sns
@@ -16,6 +17,7 @@ app = Flask(__name__)
 matplotlib.use('Agg')
 graph_types = ["scatter", "hist", "box", "bar"]
 
+
 @app.route('/run-model', methods=['POST'])
 def run_model():
     data = request.get_json()
@@ -26,11 +28,25 @@ def run_model():
     raw_data = data.get('data')
     sensitive_feature = data.get('sensitiveFeature', None)
 
-
     df = pd.DataFrame(raw_data)
+    df = df.dropna(subset=features + [target])
     X = df[features]
     X = pd.get_dummies(X, drop_first=True)
+
+    # Determine if target is categorical or numeric
     y = pd.to_numeric(df[target], errors='coerce')
+
+    # Check if the first value is NaN
+    if pd.isna(y.iloc[0]):
+        y = df[target]
+        le = LabelEncoder()
+        y = le.fit_transform(y)
+    
+    # Check if there are enough samples to split
+    if len(X) == 0 or len(y) == 0:
+        return jsonify({'error': 'No valid data available after dropping missing values.'}), 400
+    if len(X) < 2:
+        return jsonify({'error': 'Not enough data to split into train and test sets.'}), 400
 
     # Encode sensitive feature if present and categorical
     if sensitive_feature and sensitive_feature in df.columns:
@@ -44,24 +60,89 @@ def run_model():
 
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 
-    if model_type not in model_types:
+    if model_type in regression_models:
+        model = regression_models[model_type]
+        try:
+            model.fit(X_train, y_train)
+            y_pred = model.predict(X_test)
+        except Exception as e:
+            print(f"Error during model fitting or prediction: {str(e)}")
+            return jsonify({'error': str(e)}), 400
+
+        # Evaluate basic performance
+        mse = root_mean_squared_error(y_test, y_pred)
+        r2 = r2_score(y_test, y_pred)
+
+        results = {
+            'mse': mse,
+            'r2': r2,
+        }
+        # Overfitting plot: train vs test predictions
+        y_train_pred = model.predict(X_train)
+        y_test_pred = y_pred  # already computed
+
+        plt.figure(figsize=(6, 6))
+        sns.scatterplot(x=y_train, y=y_train_pred, color='blue', alpha=0.5, label='Train')
+        sns.scatterplot(x=y_test, y=y_test_pred, color='orange', alpha=0.7, label='Test')
+        min_val = min(y.min(), y_train_pred.min(), y_test_pred.min())
+        max_val = max(y.max(), y_train_pred.max(), y_test_pred.max())
+        plt.plot([min_val, max_val], [min_val, max_val], color='red', linestyle='--', linewidth=2, label='Ideal')
+        plt.xlabel('Actual')
+        plt.ylabel('Predicted')
+        plt.title('Train vs Test')
+        plt.legend()
+        plt.tight_layout()
+        plt.xticks(np.linspace(min_val, max_val, num=6))
+        plt.yticks(np.linspace(min_val, max_val, num=6))
+
+    elif model_type in classifier_models:
+        model = classifier_models[model_type]
+        try:
+            model.fit(X_train, y_train)
+            y_pred = model.predict(X_test)
+        except Exception as e:
+            print(f"Error during model fitting or prediction: {str(e)}")
+            return jsonify({'error': str(e)}), 400
+
+        # Evaluate performance
+        accuracy = accuracy_score(y_test, y_pred)
+        f1 = f1_score(y_test, y_pred, average='weighted')  # for multi-class support
+
+        results = {
+            'accuracy': accuracy,
+            'f1_score': f1,
+        }
+
+        # Overfitting visualization: Confusion matrices using Seaborn
+        y_train_pred = model.predict(X_train)
+        y_test_pred = y_pred  # already computed
+
+        train_cm = confusion_matrix(y_train, y_train_pred)
+        test_cm = confusion_matrix(y_test, y_test_pred)
+
+        fig, axs = plt.subplots(1, 2, figsize=(12, 5))
+
+        sns.heatmap(train_cm, annot=True, fmt='d', cmap='Blues', ax=axs[0])
+        axs[0].set_title("Train Confusion Matrix")
+        axs[0].set_xlabel("Predicted")
+        axs[0].set_ylabel("Actual")
+
+        sns.heatmap(test_cm, annot=True, fmt='d', cmap='Oranges', ax=axs[1])
+        axs[1].set_title("Test Confusion Matrix")
+        axs[1].set_xlabel("Predicted")
+        axs[1].set_ylabel("Actual")
+
+        plt.tight_layout()
+
+    else:
         return jsonify({'error': 'Unsupported model type'}), 400
     
-    try:
-        model = model_types[model_type]
-        model.fit(X_train, y_train)
-        y_pred = model.predict(X_test)
-    except Exception as e:
-        return jsonify({'error': str(e)}), 400
-
-    # Evaluate basic performance
-    mse = root_mean_squared_error(y_test, y_pred)
-    r2 = r2_score(y_test, y_pred)
-
-    results = {
-        'mse': mse,
-        'r2': r2,
-    }
+    buf_overfit = io.BytesIO()
+    plt.savefig(buf_overfit, format='png')
+    plt.close()
+    buf_overfit.seek(0)
+    overfit_plot_base64 = base64.b64encode(buf_overfit.read()).decode('utf-8')
+    results['overfitting_plot'] = overfit_plot_base64
 
     # Fairness metrics
     if sensitive_encoded is not None:
@@ -88,6 +169,9 @@ def run_model():
         fairness_means = mf.by_group['mean_prediction']
         fairness_means.plot(kind='bar', color='skyblue')
         plt.ylabel('Mean Prediction')
+        # Show x-ticks as original sensitive group labels if available
+        if sensitive_feature and sensitive_feature in df.columns and 'sensitive_labels' in locals():
+            plt.xticks(ticks=range(len(sensitive_labels)), labels=sensitive_labels, rotation=45, ha='right')
         plt.xlabel(sensitive_feature)
         plt.title('Mean Prediction by Sensitive Group')
         plt.tight_layout()
@@ -98,36 +182,15 @@ def run_model():
         fairness_plot_base64 = base64.b64encode(buf_fairness.read()).decode('utf-8')
         results['fairness_plot'] = fairness_plot_base64
 
-    # Overfitting plot: train vs test predictions
-    y_train_pred = model.predict(X_train)
-    y_test_pred = y_pred  # already computed
-
-    plt.figure(figsize=(6, 6))
-    sns.scatterplot(x=y_train, y=y_train_pred, color='blue', alpha=0.5, label='Train')
-    sns.scatterplot(x=y_test, y=y_test_pred, color='orange', alpha=0.7, label='Test')
-    min_val = min(y.min(), y_train_pred.min(), y_test_pred.min())
-    max_val = max(y.max(), y_train_pred.max(), y_test_pred.max())
-    plt.plot([min_val, max_val], [min_val, max_val], color='red', linestyle='--', linewidth=2, label='Ideal')
-    plt.xlabel('Actual')
-    plt.ylabel('Predicted')
-    plt.title('Train vs Test')
-    plt.legend()
-    plt.tight_layout()
-    plt.xticks(np.linspace(min_val, max_val, num=6))
-    plt.yticks(np.linspace(min_val, max_val, num=6))
-
-    buf_overfit = io.BytesIO()
-    plt.savefig(buf_overfit, format='png')
-    plt.close()
-    buf_overfit.seek(0)
-    overfit_plot_base64 = base64.b64encode(buf_overfit.read()).decode('utf-8')
-    results['overfitting_plot'] = overfit_plot_base64
-
     return jsonify(results)
 
 @app.route('/model-types', methods=['GET'])
 def get_model_types():
-    return jsonify(list(model_types.keys()))
+    model_types = {
+        "regression": list(regression_models.keys()),
+        "classifier": list(classifier_models.keys())
+    }
+    return jsonify(model_types)
 
 @app.route('/graph-types', methods=['GET'])
 def get_graph_types():
@@ -160,7 +223,12 @@ def explore_data():
         plt.title(f'Diagrama de dispersión de {y} vs {x_values[0]}')
     elif graph_type == 'hist':
         for x_col in x_values:
-            sns.histplot(df[x_col], kde=True, hue=df[hue] if hue else None, palette="hls", element="step", alpha=0.5, label=x_col)
+            if hue and hue in df.columns:
+                for hue_value in df[hue].unique():
+                    subset = df[df[hue] == hue_value]
+                    sns.histplot(subset[x_col], kde=True, element="step", alpha=0.5, label=f"{x_col} ({hue_value})")
+            else:
+                sns.histplot(df[x_col], kde=True, element="step", alpha=0.5, label=x_col)
         plt.xlabel(", ".join(str(col) for col in x_values))
         plt.title(f'Histograma de {", ".join(str(col) for col in x_values)}')
         plt.legend()
@@ -175,7 +243,7 @@ def explore_data():
             )
         plt.ylabel(y)
         plt.xlabel(", ".join(x_values))
-        plt.title(f'Diagrama de cajas y bigotes de {', '.join(x_values)}')
+        plt.title(f"Diagrama de cajas y bigotes de {', '.join(x_values)}")
     elif graph_type == 'bar' and y:
         for x_col in x_values:
             sns.barplot(x=df[x_col], y=df[y], hue=df[hue] if hue else None, palette="hls")
