@@ -30,6 +30,7 @@ def run_model():
 
     df = pd.DataFrame(raw_data)
     df = df.dropna(subset=features + [target])
+    original_df = df.copy()
     X = df[features]
     X = pd.get_dummies(X, drop_first=True)
 
@@ -41,6 +42,9 @@ def run_model():
         y = df[target]
         le = LabelEncoder()
         y = le.fit_transform(y)
+        class_labels = le.classes_
+    else:
+        class_labels = np.unique(df[target])
     
     # Check if there are enough samples to split
     if len(X) == 0 or len(y) == 0:
@@ -48,9 +52,12 @@ def run_model():
     if len(X) < 2:
         return jsonify({'error': 'Not enough data to split into train and test sets.'}), 400
 
+    if sensitive_feature and sensitive_feature in original_df.columns:
+        sensitive_labels_original = sorted(original_df[sensitive_feature].dropna().unique().tolist())
+
     # Encode sensitive feature if present and categorical
-    if sensitive_feature and sensitive_feature in df.columns:
-        sensitive_series = df[sensitive_feature]
+    if sensitive_feature and sensitive_feature in original_df.columns:
+        sensitive_series = original_df[sensitive_feature]
         if sensitive_series.dtype == 'object' or str(sensitive_series.dtype).startswith('category'):
             sensitive_encoded, sensitive_labels = pd.factorize(sensitive_series)
         else:
@@ -92,8 +99,13 @@ def run_model():
         plt.title('Train vs Test')
         plt.legend()
         plt.tight_layout()
-        plt.xticks(np.linspace(min_val, max_val, num=6))
-        plt.yticks(np.linspace(min_val, max_val, num=6))
+        # Use numeric ticks if target is numeric, else use class labels
+        if class_labels is not None:
+            plt.xticks(ticks=np.arange(len(class_labels)), labels=class_labels, rotation=45)
+            plt.yticks(ticks=np.arange(len(class_labels)), labels=class_labels, rotation=45)
+        else:
+            plt.xticks(np.linspace(min_val, max_val, num=6))
+            plt.yticks(np.linspace(min_val, max_val, num=6))
 
     elif model_type in classifier_models:
         model = classifier_models[model_type]
@@ -123,11 +135,19 @@ def run_model():
         fig, axs = plt.subplots(1, 2, figsize=(12, 5))
 
         sns.heatmap(train_cm, annot=True, fmt='d', cmap='Blues', ax=axs[0])
+        axs[0].set_xticks(np.arange(len(class_labels)))
+        axs[0].set_yticks(np.arange(len(class_labels)))
+        axs[0].set_xticklabels(class_labels, rotation=45)
+        axs[0].set_yticklabels(class_labels)
         axs[0].set_title("Train Confusion Matrix")
         axs[0].set_xlabel("Predicted")
         axs[0].set_ylabel("Actual")
 
         sns.heatmap(test_cm, annot=True, fmt='d', cmap='Oranges', ax=axs[1])
+        axs[1].set_xticks(np.arange(len(class_labels)))
+        axs[1].set_yticks(np.arange(len(class_labels)))
+        axs[1].set_xticklabels(class_labels, rotation=45)
+        axs[1].set_yticklabels(class_labels)
         axs[1].set_title("Test Confusion Matrix")
         axs[1].set_xlabel("Predicted")
         axs[1].set_ylabel("Actual")
@@ -169,9 +189,8 @@ def run_model():
         fairness_means = mf.by_group['mean_prediction']
         fairness_means.plot(kind='bar', color='skyblue')
         plt.ylabel('Mean Prediction')
-        # Show x-ticks as original sensitive group labels if available
-        if sensitive_feature and sensitive_feature in df.columns and 'sensitive_labels' in locals():
-            plt.xticks(ticks=range(len(sensitive_labels)), labels=sensitive_labels, rotation=45, ha='right')
+        if sensitive_feature and sensitive_feature in original_df.columns and 'sensitive_labels' in locals():
+            plt.xticks(ticks=range(len(sensitive_labels_original)), labels=sensitive_labels_original, rotation=45, ha='right')
         plt.xlabel(sensitive_feature)
         plt.title('Mean Prediction by Sensitive Group')
         plt.tight_layout()
