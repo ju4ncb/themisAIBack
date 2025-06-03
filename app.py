@@ -15,7 +15,7 @@ import base64
 #comienzo
 app = Flask(__name__)
 matplotlib.use('Agg')
-graph_types = ["scatter", "hist", "box", "bar"]
+graph_types = {"bivariable": ["reg", "hist", "box", "bar"], "univariable": ["hist", "box", "violin", "count"], "multivariable": ["corr"]}
 
 
 @app.route('/run-model', methods=['POST'])
@@ -225,17 +225,22 @@ def get_model_types():
 def get_graph_types():
     return jsonify(graph_types)
 
-@app.route('/corr', methods=["POST"])
-def corr():
+@app.route('/multivariable', methods=["POST"])
+def multivariable():
     data = request.get_json()
     cols = data.get('cols')
     raw_data = data.get('data')
 
     df = pd.DataFrame(raw_data)
-    # Convert columns that can be turned into numeric
-    for col in df.columns:
-        df[col] = pd.to_numeric(df[col], errors='ignore')
-    plt.figure(figsize=(6, 4))
+    # Recorre las columnas no numéricas y aplica LabelEncoder
+    for col in df.select_dtypes(include=['object', 'category']).columns:
+        le = LabelEncoder()
+        try:
+            df[col] = le.fit_transform(df[col].astype(str))
+        except Exception as e:
+            return jsonify({"error": f"No se pudo codificar la columna {col}: {e}"}), 400
+
+    plt.figure(figsize=(12, 8))
 
     sns.heatmap(df[cols].corr(), annot=True, cmap='coolwarm', fmt='.2f')
 
@@ -269,15 +274,13 @@ def univariable():
     # Plot with match-case
     match graph_type:
         case 'hist':
-            sns.histplot(data=df, x=x, kde=True)
+            sns.histplot(data=df, x=x, kde=True, palette="hls")
         case 'box':
-            sns.boxplot(data=df, x=x)
-        case 'bar':
-            sns.barplot(data=df[x].value_counts().reset_index(), x='index', y=x)
+            sns.boxplot(data=df, x=x, palette="hls")
         case 'count':
-            sns.countplot(data=df, x=x)
+            sns.countplot(data=df, x=x, palette="hls")
         case 'violin':
-            sns.violinplot(data=df, x=x)
+            sns.violinplot(data=df, x=x, palette="hls")
         case _:
             return jsonify({'error': f'Plot type "{graph_type}" not recognized'}), 400
 
@@ -323,12 +326,15 @@ def bivariable():
 
     match graph_type:
         case 'reg':
-            sns.regplot(
-                x=df[x],
-                y=df[y],
-                hue=df[hue] if hue else None,
-                palette="hls"
-            )
+            if hue:
+                unique_values = df[hue].unique()
+                palette = sns.color_palette("hls", len(unique_values))
+                for i, val in enumerate(unique_values):
+                    subset = df[df[hue] == val]
+                    sns.regplot(x=subset[x], y=subset[y], color=palette[i], label=str(val))
+                plt.legend(title=hue)
+            else:
+                sns.regplot(x=df[x], y=df[y])
             plt.xlabel(x)
             plt.ylabel(y)
             plt.title(f'Diagrama de regresión de {y} vs {x}')
