@@ -225,17 +225,94 @@ def get_model_types():
 def get_graph_types():
     return jsonify(graph_types)
 
-@app.route('/explore-data', methods=["POST"])
-def explore_data():
+@app.route('/corr', methods=["POST"])
+def corr():
     data = request.get_json()
+    cols = data.get('cols')
     raw_data = data.get('data')
-    x_values = data.get('x')
-    y = data.get('y')
-    if isinstance(y, list):
-        y = y[0] if len(y) > 0 else None
 
+    df = pd.DataFrame(raw_data)
+    # Convert columns that can be turned into numeric
+    for col in df.columns:
+        df[col] = pd.to_numeric(df[col], errors='ignore')
+    plt.figure(figsize=(6, 4))
+
+    sns.heatmap(df[cols].corr(), annot=True, cmap='coolwarm', fmt='.2f')
+
+    # Rotate x-tick labels if there are more than 4 unique ticks
+    ax = plt.gca()
+    x_tick_labels = ax.get_xticklabels()
+    if len(x_tick_labels) > 4:
+        plt.setp(x_tick_labels, rotation=45, ha='right')
+        
+    plt.tight_layout()
+    buf = io.BytesIO()
+    plt.savefig(buf, format='png')
+    plt.close()
+    buf.seek(0)
+    img_base64 = base64.b64encode(buf.read()).decode('utf-8')
+    return jsonify({'image': img_base64})
+
+@app.route('/univariable', methods=["POST"])
+def univariable():
+    data = request.get_json()
+    x = data.get('x')
+    graph_type = data.get('graphType')
+    raw_data = data.get('data')
+
+    df = pd.DataFrame(raw_data)
+    # Convert columns that can be turned into numeric
+    for col in df.columns:
+        df[col] = pd.to_numeric(df[col], errors='ignore')
+
+    plt.figure(figsize=(6, 4))
+    # Plot with match-case
+    match graph_type:
+        case 'hist':
+            sns.histplot(data=df, x=x, kde=True)
+        case 'box':
+            sns.boxplot(data=df, x=x)
+        case 'bar':
+            sns.barplot(data=df[x].value_counts().reset_index(), x='index', y=x)
+        case 'count':
+            sns.countplot(data=df, x=x)
+        case 'violin':
+            sns.violinplot(data=df, x=x)
+        case _:
+            return jsonify({'error': f'Plot type "{graph_type}" not recognized'}), 400
+
+    ax = plt.gca()
+
+    # If numeric, limit xticks to 10
+    if pd.api.types.is_numeric_dtype(df[x]):
+        # Get current xticks
+        xticks = ax.get_xticks()
+        if len(xticks) > 10:
+            # Choose up to 10 evenly spaced ticks
+            limited_xticks = np.linspace(min(xticks), max(xticks), 10)
+            ax.set_xticks(limited_xticks)
+            ax.set_xticklabels([f'{tick:.2f}' for tick in limited_xticks], rotation=45, ha='right')
+    else:
+        # If not numeric, rotate if too many categories
+        if len(df[x].unique()) > 4:
+            plt.setp(ax.get_xticklabels(), rotation=45, ha='right')
+        
+    plt.tight_layout()
+    buf = io.BytesIO()
+    plt.savefig(buf, format='png')
+    plt.close()
+    buf.seek(0)
+    img_base64 = base64.b64encode(buf.read()).decode('utf-8')
+    return jsonify({'image': img_base64})
+
+@app.route('/bivariable', methods=["POST"])
+def bivariable():
+    data = request.get_json()
+    x = data.get('x')
+    y = data.get('y')
     graph_type = data.get('graphType')
     hue = data.get('hue', None)
+    raw_data = data.get('data')
 
     df = pd.DataFrame(raw_data)
     # Convert columns that can be turned into numeric
@@ -244,49 +321,67 @@ def explore_data():
 
     plt.figure(figsize=(6, 4))
 
-
-    if graph_type == 'scatter':
-        sns.scatterplot(x=df[x_values].squeeze(), y=df[y], hue=df[hue] if hue else None, palette="hls")
-        plt.xlabel(x_values[0])
-        plt.ylabel(y)
-        plt.title(f'Diagrama de dispersión de {y} vs {x_values[0]}')
-    elif graph_type == 'hist':
-        for x_col in x_values:
+    match graph_type:
+        case 'reg':
+            sns.regplot(
+                x=df[x],
+                y=df[y],
+                hue=df[hue] if hue else None,
+                palette="hls"
+            )
+            plt.xlabel(x)
+            plt.ylabel(y)
+            plt.title(f'Diagrama de regresión de {y} vs {x}')
+    
+        case 'hist':
             if hue and hue in df.columns:
                 for hue_value in df[hue].unique():
                     subset = df[df[hue] == hue_value]
-                    sns.histplot(subset[x_col], kde=True, element="step", alpha=0.5, label=f"{x_col} ({hue_value})")
+                    sns.histplot(
+                        subset[x],
+                        kde=True,
+                        element="step",
+                        alpha=0.5,
+                        label=f"{x} ({hue_value})"
+                    )
             else:
-                sns.histplot(df[x_col], kde=True, element="step", alpha=0.5, label=x_col)
-        plt.xlabel(", ".join(str(col) for col in x_values))
-        plt.title(f'Histograma de {", ".join(str(col) for col in x_values)}')
-        plt.legend()
-    elif graph_type == 'box':
-        for x_col in x_values:
+                sns.histplot(df[x], kde=True, element="step", alpha=0.5, label=x)
+    
+            plt.xlabel(x)
+            plt.title(f'Histograma de {x} vs {y}')
+            plt.legend()
+    
+        case 'box':
             sns.boxplot(
-                x=x_col,
+                x=x,
                 y=y,
                 data=df,
                 hue=df[hue] if hue else None,
                 palette="hls"
             )
-        plt.ylabel(y)
-        plt.xlabel(", ".join(x_values))
-        plt.title(f"Diagrama de cajas y bigotes de {', '.join(x_values)}")
-    elif graph_type == 'bar' and y:
-        for x_col in x_values:
-            sns.barplot(x=df[x_col], y=df[y], hue=df[hue] if hue else None, palette="hls")
-        plt.xlabel(", ".join(x_values))
-        plt.ylabel(y)
-        plt.title(f'Diagrama de barras de {y} por {", ".join(x_values)}')
-    else:
-        plt.close()
-        return jsonify({'error': 'Unsupported graph type or missing parameters'}), 400
+            plt.ylabel(y)
+            plt.xlabel(x)
+            plt.title(f"Diagrama de cajas y bigotes de {x} vs {y}")
+    
+        case 'bar' if y:
+            sns.barplot(
+                x=df[x],
+                y=df[y],
+                hue=df[hue] if hue else None,
+                palette="hls"
+            )
+            plt.xlabel(x)
+            plt.ylabel(y)
+            plt.title(f'Diagrama de barras de {x} vs {y}')
+    
+        case _:
+            plt.close()
+            return jsonify({'error': 'Unsupported graph type or missing parameters'}), 400
 
-    # Rotate x-tick labels if there are more than 5 unique ticks
+    # Rotate x-tick labels if there are more than 4 unique ticks
     ax = plt.gca()
     x_tick_labels = ax.get_xticklabels()
-    if len(x_tick_labels) > 5:
+    if len(x_tick_labels) > 4:
         plt.setp(x_tick_labels, rotation=45, ha='right')
         
     plt.tight_layout()
