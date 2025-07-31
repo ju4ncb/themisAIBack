@@ -17,6 +17,7 @@ from sklearn.neighbors import KNeighborsClassifier
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 
+
 regression_models = {
     "linear": LinearRegression(),
     "poly": make_pipeline(PolynomialFeatures(degree=2), LinearRegression()),
